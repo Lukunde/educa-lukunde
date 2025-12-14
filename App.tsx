@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { BookOpen, Pencil, Upload, Split, Plus, MessageSquare, Download, Menu, FileSpreadsheet, SaveAll, Palette, X, Trash2, Copy, Edit, ZoomIn, ZoomOut, Share2, Lock, Unlock, Link as LinkIcon, Check, Moon, Sun, ShieldCheck, Calculator, Clock, Calendar, ListChecks } from 'lucide-react';
+import { BookOpen, Pencil, Upload, Split, Plus, MessageSquare, Download, Menu, FileSpreadsheet, SaveAll, Palette, X, Trash2, Copy, Edit, ZoomIn, ZoomOut, Share2, Lock, Unlock, Link as LinkIcon, Check, Moon, Sun, ShieldCheck, Calculator, Clock, Calendar, ListChecks, Eye } from 'lucide-react';
 import Spreadsheet from './components/Spreadsheet';
 import AIAssistant from './components/AIAssistant';
 import { Sheet, SheetData, ConditionalRule, ConditionType, ConditionalStyle, ValidationRule, ValidationType } from './types';
@@ -50,15 +50,20 @@ const App: React.FC = () => {
       // 4. Structure check
       if (!Array.isArray(parsed)) return [];
       
-      // 5. Deep content validation
-      return parsed.filter((s: any) => 
-        s && 
-        typeof s === 'object' && 
-        typeof s.id === 'string' && 
-        Array.isArray(s.data)
-      );
+      // 5. Deep content validation & MIGRATION of old accessCode
+      return parsed.map((s: any) => {
+          if (!s || typeof s !== 'object' || typeof s.id !== 'string') return null;
+          
+          // Legacy migration: If has accessCode but no editCode, map it
+          if (s.accessCode && !s.editCode) {
+              s.editCode = s.accessCode;
+              // We keep accessCode temporarily or delete it. Let's keep s structure valid.
+          }
+          
+          return s;
+      }).filter((s: any) => s !== null);
+
     } catch (e) {
-      // Log warning but do not crash the app. Return empty array to trigger default sheet creation.
       console.warn("Educa-Lukunde: Could not load data from localStorage (security or corruption issue). Starting fresh.", e);
       return [];
     }
@@ -106,10 +111,13 @@ const App: React.FC = () => {
 
   // Sharing & Security State
   const [showShareModal, setShowShareModal] = useState(false);
-  const [unlockedSheets, setUnlockedSheets] = useState<Set<string>>(new Set());
+  // unlockedSheets tracks the LEVEL of access: 'edit' or 'view'
+  const [unlockedSheets, setUnlockedSheets] = useState<Record<string, 'edit' | 'view'>>({}); 
   const [accessCodeInput, setAccessCodeInput] = useState("");
   const [accessError, setAccessError] = useState<string | null>(null);
-  const [copySuccess, setCopySuccess] = useState(false);
+  
+  const [copyEditSuccess, setCopyEditSuccess] = useState(false);
+  const [copyViewSuccess, setCopyViewSuccess] = useState(false);
   const [linkCopySuccess, setLinkCopySuccess] = useState(false);
   
   // Expiration Configuration State
@@ -123,7 +131,16 @@ const App: React.FC = () => {
   const [zoomLevel, setZoomLevel] = useState(1);
 
   const activeSheet = sheets.find(s => s.id === activeSheetId);
-  const isSheetLocked = activeSheet?.accessCode ? !unlockedSheets.has(activeSheet.id) : false;
+  const currentAccess = activeSheetId ? unlockedSheets[activeSheetId] : undefined;
+  
+  // A sheet is "Locked" (showing the lock screen) if:
+  // 1. It has security codes (edit or view)
+  // 2. AND the user hasn't unlocked it yet (no entry in unlockedSheets)
+  const isSheetLocked = activeSheet && (activeSheet.editCode || activeSheet.viewCode) && !currentAccess;
+  
+  // Access Levels
+  const canEdit = activeSheet && (!activeSheet.editCode && !activeSheet.viewCode) ? true : currentAccess === 'edit';
+  const isReadOnly = currentAccess === 'view';
 
   // Apply Theme
   useEffect(() => {
@@ -183,7 +200,8 @@ const App: React.FC = () => {
       };
       setSheets([initialSheet]);
       setActiveSheetId('init');
-      setUnlockedSheets(new Set(['init'])); // Initially unlocked for creator
+      // Auto unlock 'init' sheet as 'edit'
+      setUnlockedSheets(prev => ({ ...prev, 'init': 'edit' }));
     } else if (!activeSheetId) {
        // If loaded from storage, check URL for shared sheet or default to first
        let sharedSheetId: string | null = null;
@@ -201,8 +219,8 @@ const App: React.FC = () => {
          if (firstSheet) {
             setActiveSheetId(firstSheet.id);
             // Auto unlock if it's the default/init sheet and not shared
-            if (!firstSheet.accessCode) {
-                setUnlockedSheets(new Set([firstSheet.id]));
+            if (!firstSheet.editCode && !firstSheet.viewCode) {
+                setUnlockedSheets(prev => ({ ...prev, [firstSheet.id]: 'edit' }));
             }
          }
        }
@@ -319,11 +337,11 @@ const App: React.FC = () => {
     setIsProcessing(true);
     try {
       const parsedSheets = await parseExcelFile(file);
-      // Mark uploaded sheets as unlocked for the uploader
+      // Mark uploaded sheets as unlocked ('edit') for the uploader
       const newIds = parsedSheets.map(s => s.id);
       setUnlockedSheets(prev => {
-        const next = new Set(prev);
-        newIds.forEach(id => next.add(id));
+        const next = { ...prev };
+        newIds.forEach(id => { next[id] = 'edit'; });
         return next;
       });
       
@@ -383,8 +401,8 @@ const App: React.FC = () => {
       const newSheets = splitSheetByColumn(activeSheet, columnIndex);
       
       setUnlockedSheets(prev => {
-        const next = new Set(prev);
-        newSheets.forEach(s => next.add(s.id));
+        const next = { ...prev };
+        newSheets.forEach(s => { next[s.id] = 'edit'; });
         return next;
       });
 
@@ -610,7 +628,7 @@ const App: React.FC = () => {
   };
 
   const updateCell = (r: number, c: number, value: any) => {
-    if (!activeSheet) return;
+    if (!activeSheet || !canEdit) return;
 
     // Check Validation Rules
     const validationRule = activeSheet.validationRules?.find(rule => rule.columnIndex === c);
@@ -657,7 +675,7 @@ const App: React.FC = () => {
   };
 
   const handleAddRule = () => {
-    if (!activeSheet) return;
+    if (!activeSheet || !canEdit) return;
 
     const colIndex = getColIndex(newRule.colHeader);
     if (colIndex < 0) {
@@ -683,7 +701,7 @@ const App: React.FC = () => {
   };
 
   const handleAddValidation = () => {
-    if (!activeSheet) return;
+    if (!activeSheet || !canEdit) return;
     const colIndex = getColIndex(newValidation.colHeader);
     if (colIndex < 0) {
         alert("Coluna inválida");
@@ -728,6 +746,12 @@ const App: React.FC = () => {
     const sheet = sheets.find(s => s.id === contextMenu.sheetId);
     if (!sheet) return;
 
+    // Permissions check: user must have edit access to rename
+    if (unlockedSheets[sheet.id] !== 'edit' && (sheet.editCode || sheet.viewCode)) {
+        alert("Apenas editores podem renomear planilhas.");
+        return;
+    }
+
     const newName = prompt("Renomear planilha:", sheet.name);
     if (newName && newName.trim()) {
       setSheets(prev => prev.map(s => s.id === sheet.id ? { ...s, name: newName.trim() } : s));
@@ -747,13 +771,18 @@ const App: React.FC = () => {
       data: JSON.parse(JSON.stringify(sheet.data)), // Deep copy data
       conditionalFormats: sheet.conditionalFormats ? [...sheet.conditionalFormats] : [],
       validationRules: sheet.validationRules ? [...sheet.validationRules] : [],
-      accessCode: sheet.accessCode,
-      accessCodeExpiration: sheet.accessCodeExpiration
+      // Copy security settings
+      editCode: sheet.editCode,
+      viewCode: sheet.viewCode,
+      accessCode: sheet.accessCode, 
+      accessCodeExpiration: sheet.accessCodeExpiration,
+      isShared: sheet.isShared
     };
 
     setUnlockedSheets(prev => {
-        const next = new Set(prev);
-        if(unlockedSheets.has(sheet.id)) next.add(newSheet.id);
+        const next = { ...prev };
+        // Inherit access level for the copy
+        if(unlockedSheets[sheet.id]) next[newSheet.id] = unlockedSheets[sheet.id];
         return next;
     });
 
@@ -764,6 +793,15 @@ const App: React.FC = () => {
 
   const handleDeleteSheet = () => {
     if (!contextMenu) return;
+    const sheet = sheets.find(s => s.id === contextMenu.sheetId);
+    
+    // Permission check
+    if (sheet && unlockedSheets[sheet.id] !== 'edit' && (sheet.editCode || sheet.viewCode)) {
+        alert("Apenas editores podem excluir planilhas.");
+        setContextMenu(null);
+        return;
+    }
+
     if (sheets.length <= 1) {
       alert("Não é possível excluir a única planilha existente.");
       setContextMenu(null);
@@ -802,20 +840,33 @@ const App: React.FC = () => {
     
     const expiresAt = now + (expirationValue * multiplier);
 
-    const code = Math.random().toString(36).slice(-6).toUpperCase();
-    const updatedSheet = { ...activeSheet, accessCode: code, accessCodeExpiration: expiresAt, isShared: true };
+    const editCode = Math.random().toString(36).slice(-6).toUpperCase();
+    const viewCode = Math.random().toString(36).slice(-6).toUpperCase();
+
+    const updatedSheet: Sheet = { 
+        ...activeSheet, 
+        editCode: editCode, 
+        viewCode: viewCode, 
+        accessCodeExpiration: expiresAt, 
+        isShared: true 
+    };
+
     setSheets(prev => prev.map(s => s.id === activeSheet.id ? updatedSheet : s));
     
-    setUnlockedSheets(prev => {
-        const next = new Set(prev);
-        next.add(activeSheet.id);
-        return next;
-    });
+    // Unlock for creator as Editor
+    setUnlockedSheets(prev => ({ ...prev, [activeSheet.id]: 'edit' }));
   };
 
   const handleRemoveAccessCode = () => {
     if (!activeSheet) return;
-    const updatedSheet = { ...activeSheet, accessCode: undefined, accessCodeExpiration: undefined, isShared: false };
+    const updatedSheet = { 
+        ...activeSheet, 
+        editCode: undefined, 
+        viewCode: undefined,
+        accessCode: undefined,
+        accessCodeExpiration: undefined, 
+        isShared: false 
+    };
     setSheets(prev => prev.map(s => s.id === activeSheet.id ? updatedSheet : s));
   };
 
@@ -824,16 +875,23 @@ const App: React.FC = () => {
      
      // Check Expiration
      if (activeSheet.accessCodeExpiration && Date.now() > activeSheet.accessCodeExpiration) {
-         setAccessError("O código expirou. O administrador deve gerar um novo.");
+         setAccessError("Os códigos expiraram. O administrador deve gerar novos.");
          return;
      }
 
-     if (accessCodeInput.trim().toUpperCase() === activeSheet.accessCode) {
-        setUnlockedSheets(prev => {
-            const next = new Set(prev);
-            next.add(activeSheet.id);
-            return next;
-        });
+     const input = accessCodeInput.trim().toUpperCase();
+
+     if (input === activeSheet.editCode) {
+        setUnlockedSheets(prev => ({ ...prev, [activeSheet.id]: 'edit' }));
+        setAccessCodeInput("");
+        setAccessError(null);
+     } else if (input === activeSheet.viewCode) {
+        setUnlockedSheets(prev => ({ ...prev, [activeSheet.id]: 'view' }));
+        setAccessCodeInput("");
+        setAccessError(null);
+     } else if (input === activeSheet.accessCode) { 
+        // Legacy fallback
+        setUnlockedSheets(prev => ({ ...prev, [activeSheet.id]: 'edit' }));
         setAccessCodeInput("");
         setAccessError(null);
      } else {
@@ -844,8 +902,8 @@ const App: React.FC = () => {
   const handleSimulateLock = () => {
       if (!activeSheet) return;
       setUnlockedSheets(prev => {
-          const next = new Set(prev);
-          next.delete(activeSheet.id);
+          const next = { ...prev };
+          delete next[activeSheet.id];
           return next;
       });
       setShowShareModal(false);
@@ -860,7 +918,6 @@ const App: React.FC = () => {
   const handleCopyLink = () => {
       if (!activeSheet) return;
       
-      // Use fallback if window.location.origin is unavailable/null
       let origin = "";
       try {
           origin = window.location.origin;
@@ -884,12 +941,17 @@ const App: React.FC = () => {
       }
   };
   
-  const handleCopyCode = () => {
-      if (!activeSheet || !activeSheet.accessCode) return;
+  const handleCopyCode = (code: string | undefined, type: 'edit' | 'view') => {
+      if (!code) return;
       if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(activeSheet.accessCode).then(() => {
-              setCopySuccess(true);
-              setTimeout(() => setCopySuccess(false), 2000);
+          navigator.clipboard.writeText(code).then(() => {
+              if (type === 'edit') {
+                  setCopyEditSuccess(true);
+                  setTimeout(() => setCopyEditSuccess(false), 2000);
+              } else {
+                  setCopyViewSuccess(true);
+                  setTimeout(() => setCopyViewSuccess(false), 2000);
+              }
           }).catch(() => {});
       }
   };
@@ -916,15 +978,15 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2">
           {isProcessing && <span className="text-sm text-emerald-600 dark:text-emerald-400 animate-pulse font-medium mr-4">Processando...</span>}
           
-          <label className="flex items-center gap-2 px-3 py-2 bg-gray-50 dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-md cursor-pointer border border-gray-200 dark:border-gray-600 transition-colors text-sm font-medium">
+          <label className={`flex items-center gap-2 px-3 py-2 bg-gray-50 dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-md cursor-pointer border border-gray-200 dark:border-gray-600 transition-colors text-sm font-medium ${isReadOnly ? 'opacity-50 pointer-events-none' : ''}`}>
             <Upload size={16} />
             <span className="hidden sm:inline">Carregar Excel</span>
-            <input type="file" accept=".xlsx, .xls, .csv" onChange={handleFileUpload} className="hidden" />
+            <input type="file" accept=".xlsx, .xls, .csv" onChange={handleFileUpload} className="hidden" disabled={isReadOnly} />
           </label>
 
           <button 
             onClick={handleSplitClasses}
-            disabled={!activeSheet}
+            disabled={!activeSheet || isReadOnly}
             className="flex items-center gap-2 px-3 py-2 bg-emerald-50 dark:bg-emerald-900/30 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-emerald-700 dark:text-emerald-400 rounded-md border border-emerald-200 dark:border-emerald-800 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
             title="Separar pauta por classes/turmas"
           >
@@ -934,7 +996,7 @@ const App: React.FC = () => {
 
           <button 
             onClick={handleSetupClassValidation}
-            disabled={!activeSheet || isSheetLocked}
+            disabled={!activeSheet || isSheetLocked || isReadOnly}
             className="flex items-center gap-2 px-3 py-2 bg-emerald-50 dark:bg-emerald-900/30 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-emerald-700 dark:text-emerald-400 rounded-md border border-emerald-200 dark:border-emerald-800 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
             title="Restringir coluna de Turma a valores específicos"
           >
@@ -944,7 +1006,7 @@ const App: React.FC = () => {
 
           <button 
             onClick={handleCalculateAverages}
-            disabled={!activeSheet || isSheetLocked}
+            disabled={!activeSheet || isSheetLocked || isReadOnly}
             className="flex items-center gap-2 px-3 py-2 bg-emerald-50 dark:bg-emerald-900/30 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-emerald-700 dark:text-emerald-400 rounded-md border border-emerald-200 dark:border-emerald-800 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
             title="Calcular Médias (Nota 1 + Nota 2) / 2"
           >
@@ -954,7 +1016,7 @@ const App: React.FC = () => {
 
           <button 
              onClick={() => setShowValidationModal(true)}
-             disabled={!activeSheet || isSheetLocked}
+             disabled={!activeSheet || isSheetLocked || isReadOnly}
              className="p-2 text-gray-500 dark:text-gray-400 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-md transition-colors disabled:opacity-30"
              title="Validação de Dados"
           >
@@ -963,27 +1025,29 @@ const App: React.FC = () => {
 
           <button 
              onClick={() => setShowFormatModal(true)}
-             disabled={!activeSheet || isSheetLocked}
+             disabled={!activeSheet || isSheetLocked || isReadOnly}
              className="p-2 text-gray-500 dark:text-gray-400 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-md transition-colors disabled:opacity-30"
              title="Formatação Condicional"
           >
              <Palette size={20} />
           </button>
 
-          <button 
-            onClick={() => setShowShareModal(true)}
-            disabled={!activeSheet}
-            className={`flex items-center gap-2 px-3 py-2 rounded-md border transition-colors text-sm font-medium disabled:opacity-50
-                ${activeSheet?.isShared 
-                    ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-800' 
-                    : 'bg-gray-50 dark:bg-gray-700 text-gray-700 dark:text-gray-200 border-gray-200 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-600'
-                }
-            `}
-            title="Partilhar Pauta"
-          >
-            <Share2 size={16} />
-            <span className="hidden sm:inline">Partilhar</span>
-          </button>
+          {!isReadOnly && (
+              <button 
+                onClick={() => setShowShareModal(true)}
+                disabled={!activeSheet}
+                className={`flex items-center gap-2 px-3 py-2 rounded-md border transition-colors text-sm font-medium disabled:opacity-50
+                    ${activeSheet?.isShared 
+                        ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-800' 
+                        : 'bg-gray-50 dark:bg-gray-700 text-gray-700 dark:text-gray-200 border-gray-200 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-600'
+                    }
+                `}
+                title="Partilhar Pauta com Código"
+              >
+                <Share2 size={16} />
+                <span className="hidden sm:inline">Partilhar Pauta</span>
+              </button>
+          )}
 
           <button 
             onClick={handleExport}
@@ -1039,8 +1103,11 @@ const App: React.FC = () => {
                <div className="flex items-center gap-4 flex-1">
                   <span className="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded text-xs text-gray-600 dark:text-gray-300">fx</span>
                   <div className="h-4 w-px bg-gray-300 dark:bg-gray-600"></div>
-                  <span className="italic text-gray-400 dark:text-gray-500 text-xs">
-                     {isSheetLocked ? 'Pauta Bloqueada - Requer código de acesso' : 'Use as setas para navegar, Enter para editar.'}
+                  <span className="italic text-gray-400 dark:text-gray-500 text-xs flex items-center gap-2">
+                     {isSheetLocked ? 'Pauta Bloqueada - Requer código de acesso' : 
+                      isReadOnly ? 
+                        <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400 font-medium"><Eye size={12}/> Modo de Visualização (Somente Leitura)</span> : 
+                        'Use as setas para navegar, Enter para editar.'}
                   </span>
                </div>
                
@@ -1075,7 +1142,7 @@ const App: React.FC = () => {
                         <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
                             {isExpired 
                                 ? "O código de acesso para esta pauta expirou." 
-                                : "Esta pauta está protegida. Digite o código fornecido pelo administrador para editar."
+                                : "Esta pauta está protegida. Digite o código de editor ou visualizador."
                             }
                         </p>
                         
@@ -1091,7 +1158,7 @@ const App: React.FC = () => {
                                     }}
                                     onKeyDown={(e) => e.key === 'Enter' && handleUnlockSheet()}
                                     className={`w-full border-2 rounded-lg p-3 text-center text-lg tracking-widest font-mono uppercase focus:outline-none focus:ring-2 focus:ring-emerald-200 dark:focus:ring-emerald-800 bg-white dark:bg-gray-700 dark:text-white ${accessError ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20' : 'border-gray-200 dark:border-gray-600'}`}
-                                    placeholder="ABC-123"
+                                    placeholder="XXXXXX"
                                 />
                                 {accessError && <p className="text-xs text-red-500 dark:text-red-400 mt-1 text-center font-medium">{accessError}</p>}
                             </div>
@@ -1118,18 +1185,20 @@ const App: React.FC = () => {
                   rules={activeSheet?.conditionalFormats}
                   validationRules={activeSheet?.validationRules}
                   zoom={zoomLevel}
+                  readOnly={isReadOnly}
                 />
             )}
 
             {/* Bottom Tab Bar */}
             <div className="h-10 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 flex items-center px-2 gap-1 overflow-x-auto relative transition-colors duration-200">
               <button 
-                className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-gray-500 dark:text-gray-400"
+                className={`p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-gray-500 dark:text-gray-400 ${isReadOnly ? 'opacity-50 pointer-events-none' : ''}`}
                 onClick={() => {
+                   if (isReadOnly) return;
                    const newId = generateUUID();
                    setSheets([...sheets, { id: newId, name: `Nova Planilha ${sheets.length + 1}`, data: [[]], conditionalFormats: [] }]);
                    setActiveSheetId(newId);
-                   setUnlockedSheets(prev => { const n = new Set(prev); n.add(newId); return n; });
+                   setUnlockedSheets(prev => ({ ...prev, [newId]: 'edit' }));
                 }}
               >
                 <Plus size={16} />
@@ -1138,13 +1207,16 @@ const App: React.FC = () => {
               {sheets.map((sheet, index) => {
                 // Safety check for undefined sheets in list
                 if (!sheet) return null;
+                const sheetAccess = unlockedSheets[sheet.id];
+                const sheetLocked = (sheet.editCode || sheet.viewCode) && !sheetAccess;
+                
                 return (
                   <button
                     key={sheet.id || index}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, index)}
-                    onDragOver={(e) => handleDragOver(e, index)}
-                    onDragEnd={handleDragEnd}
+                    draggable={!isReadOnly}
+                    onDragStart={(e) => !isReadOnly && handleDragStart(e, index)}
+                    onDragOver={(e) => !isReadOnly && handleDragOver(e, index)}
+                    onDragEnd={!isReadOnly ? handleDragEnd : undefined}
                     onClick={() => setActiveSheetId(sheet.id)}
                     onContextMenu={(e) => handleContextMenu(e, sheet.id)}
                     className={`
@@ -1156,8 +1228,10 @@ const App: React.FC = () => {
                       ${draggedSheetIndex === index ? 'opacity-50' : ''}
                     `}
                   >
-                    {sheet.accessCode ? (
-                        unlockedSheets.has(sheet.id) ? <Unlock size={10} className="text-emerald-500"/> : <Lock size={10} className="text-red-400"/>
+                    {sheet.editCode || sheet.viewCode ? (
+                        sheetAccess === 'edit' ? <Unlock size={10} className="text-emerald-500"/> : 
+                        sheetAccess === 'view' ? <Eye size={10} className="text-blue-500"/> :
+                        <Lock size={10} className="text-red-400"/>
                     ) : (
                         <FileSpreadsheet size={12} className={activeSheetId === sheet.id ? "text-emerald-500" : "text-gray-400"} />
                     )}
@@ -1179,7 +1253,7 @@ const App: React.FC = () => {
         {/* Share Modal */}
         {showShareModal && activeSheet && (
            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm">
-             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl w-[500px] p-0 border border-gray-200 dark:border-gray-700 overflow-hidden" onClick={e => e.stopPropagation()}>
+             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl w-[550px] p-0 border border-gray-200 dark:border-gray-700 overflow-hidden" onClick={e => e.stopPropagation()}>
                <div className="bg-emerald-600 dark:bg-emerald-800 p-4 flex justify-between items-center text-white">
                  <h3 className="font-bold flex items-center gap-2 text-lg">
                    <Share2 size={20} />
@@ -1190,14 +1264,14 @@ const App: React.FC = () => {
                  </button>
                </div>
 
-               <div className="p-6 space-y-6 text-gray-800 dark:text-gray-200">
+               <div className="p-6 space-y-6 text-gray-800 dark:text-gray-200 max-h-[80vh] overflow-y-auto">
                  <div>
                     <h4 className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Estado da Partilha</h4>
-                    {activeSheet.accessCode ? (
+                    {(activeSheet.editCode || activeSheet.viewCode) ? (
                          isExpired ? (
                             <div className="flex items-center gap-2 text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/30 p-3 rounded-lg border border-red-100 dark:border-red-800">
                                <Clock size={18} />
-                               <span className="text-sm font-medium">O código atual expirou em {formatExpiration(activeSheet.accessCodeExpiration)}.</span>
+                               <span className="text-sm font-medium">Os códigos atuais expiraram em {formatExpiration(activeSheet.accessCodeExpiration)}.</span>
                             </div>
                          ) : (
                             <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/30 p-3 rounded-lg border border-emerald-100 dark:border-emerald-800">
@@ -1213,36 +1287,67 @@ const App: React.FC = () => {
                     )}
                  </div>
 
-                 {activeSheet.accessCode && !isExpired ? (
+                 {activeSheet.editCode && !isExpired ? (
                      <>
-                        <div className="space-y-2">
-                           <label className="text-xs font-semibold uppercase text-gray-400 dark:text-gray-500">Código de Acesso do Professor</label>
-                           <div className="flex items-center gap-2">
-                              <div className="flex-1 bg-gray-100 dark:bg-gray-900 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-3 text-center text-2xl font-mono tracking-widest text-gray-800 dark:text-gray-200 select-all">
-                                {activeSheet.accessCode}
-                              </div>
-                              <button 
-                                onClick={handleCopyCode}
-                                className={`p-3 border rounded-lg transition-colors ${
-                                    copySuccess 
-                                    ? 'bg-emerald-100 dark:bg-emerald-900/40 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400' 
-                                    : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300'
-                                }`}
-                                title="Copiar código"
-                              >
-                                {copySuccess ? <Check size={20} /> : <Copy size={20} />}
-                              </button>
-                           </div>
-                           <p className="text-xs text-gray-500 dark:text-gray-400">Envie este código ao professor para que ele possa editar.</p>
+                        <div className="grid grid-cols-2 gap-4">
+                            {/* Editor Access */}
+                            <div className="space-y-2 col-span-2 sm:col-span-1">
+                               <label className="text-xs font-semibold uppercase text-red-500 dark:text-red-400 flex items-center gap-1">
+                                    <Edit size={12} /> Acesso de Editor (Professor)
+                               </label>
+                               <div className="flex items-center gap-2">
+                                  <div className="flex-1 bg-red-50 dark:bg-red-900/20 border-2 border-dashed border-red-200 dark:border-red-800 rounded-lg p-2 text-center text-xl font-mono tracking-widest text-red-700 dark:text-red-200 select-all">
+                                    {activeSheet.editCode}
+                                  </div>
+                                  <button 
+                                    onClick={() => handleCopyCode(activeSheet.editCode, 'edit')}
+                                    className={`p-2 border rounded-lg transition-colors ${
+                                        copyEditSuccess 
+                                        ? 'bg-emerald-100 text-emerald-700 border-emerald-300' 
+                                        : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:bg-gray-50'
+                                    }`}
+                                  >
+                                    {copyEditSuccess ? <Check size={16} /> : <Copy size={16} />}
+                                  </button>
+                               </div>
+                               <p className="text-[10px] text-gray-400">Pode editar tudo.</p>
+                            </div>
+
+                            {/* Viewer Access */}
+                            <div className="space-y-2 col-span-2 sm:col-span-1">
+                               <label className="text-xs font-semibold uppercase text-blue-500 dark:text-blue-400 flex items-center gap-1">
+                                    <Eye size={12} /> Acesso de Visualizador
+                               </label>
+                               <div className="flex items-center gap-2">
+                                  <div className="flex-1 bg-blue-50 dark:bg-blue-900/20 border-2 border-dashed border-blue-200 dark:border-blue-800 rounded-lg p-2 text-center text-xl font-mono tracking-widest text-blue-700 dark:text-blue-200 select-all">
+                                    {activeSheet.viewCode}
+                                  </div>
+                                  <button 
+                                    onClick={() => handleCopyCode(activeSheet.viewCode, 'view')}
+                                    className={`p-2 border rounded-lg transition-colors ${
+                                        copyViewSuccess 
+                                        ? 'bg-emerald-100 text-emerald-700 border-emerald-300' 
+                                        : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:bg-gray-50'
+                                    }`}
+                                  >
+                                    {copyViewSuccess ? <Check size={16} /> : <Copy size={16} />}
+                                  </button>
+                               </div>
+                               <p className="text-[10px] text-gray-400">Apenas leitura.</p>
+                            </div>
                         </div>
 
                         <div className="space-y-2">
                            <label className="text-xs font-semibold uppercase text-gray-400 dark:text-gray-500">Link da Pauta</label>
                            <div className="flex items-center gap-2 bg-gray-50 dark:bg-gray-700 p-2 rounded border border-gray-200 dark:border-gray-600">
                               <LinkIcon size={16} className="text-gray-400 shrink-0" />
-                              <span className="text-sm text-gray-600 dark:text-gray-300 truncate flex-1">
-                                {window.location.origin}?pauta={activeSheet.id}
-                              </span>
+                              <input 
+                                type="text" 
+                                readOnly 
+                                value={`${window.location.origin}?pauta=${activeSheet.id}`} 
+                                className="text-sm text-gray-600 dark:text-gray-300 flex-1 bg-transparent outline-none truncate"
+                                onClick={(e) => e.currentTarget.select()}
+                              />
                               <button 
                                 onClick={handleCopyLink}
                                 className={`text-xs font-bold hover:underline transition-colors ${linkCopySuccess ? 'text-emerald-500 dark:text-emerald-400' : 'text-emerald-600 dark:text-emerald-400'}`}
@@ -1250,6 +1355,7 @@ const App: React.FC = () => {
                                 {linkCopySuccess ? "COPIADO!" : "COPIAR"}
                               </button>
                            </div>
+                           <p className="text-[10px] text-gray-400">Nota: O link exige um dos códigos acima para abrir.</p>
                         </div>
 
                         <div className="border-t border-gray-100 dark:border-gray-700 pt-4 flex gap-3">
@@ -1257,7 +1363,7 @@ const App: React.FC = () => {
                               onClick={handleRemoveAccessCode}
                               className="flex-1 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded border border-transparent hover:border-red-100 dark:hover:border-red-900/30 transition-colors"
                            >
-                              Revogar Acesso
+                              Revogar Todos os Acessos
                            </button>
                            <button 
                               onClick={handleSimulateLock}
@@ -1270,7 +1376,7 @@ const App: React.FC = () => {
                      </>
                  ) : (
                      <div className="text-center py-4">
-                        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">Defina a validade e gere um código seguro para o professor.</p>
+                        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">Gere códigos distintos para editores e visualizadores.</p>
                         
                         <div className="flex gap-2 mb-4 justify-center items-end">
                             <div className="text-left w-24">
@@ -1302,7 +1408,7 @@ const App: React.FC = () => {
                             onClick={handleCreateAccessCode}
                             className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-2 rounded-lg font-medium transition-colors shadow-lg shadow-emerald-200 dark:shadow-none w-full"
                         >
-                            {isExpired ? "Gerar Novo Código" : "Gerar Código de Acesso"}
+                            {isExpired ? "Gerar Novos Códigos" : "Gerar Códigos de Acesso"}
                         </button>
                      </div>
                  )}
@@ -1318,14 +1424,14 @@ const App: React.FC = () => {
             style={{ top: contextMenu.y, left: contextMenu.x }}
             onClick={(e) => e.stopPropagation()}
           >
-             <button onClick={handleRenameSheet} className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 text-gray-700 dark:text-gray-200">
+             <button onClick={handleRenameSheet} className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${isReadOnly ? 'text-gray-400 cursor-not-allowed' : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200'}`} disabled={isReadOnly}>
                 <Edit size={14} /> Renomear
              </button>
-             <button onClick={handleDuplicateSheet} className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 text-gray-700 dark:text-gray-200">
+             <button onClick={handleDuplicateSheet} className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${isReadOnly ? 'text-gray-400 cursor-not-allowed' : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200'}`} disabled={isReadOnly}>
                 <Copy size={14} /> Duplicar
              </button>
              <div className="border-t border-gray-100 dark:border-gray-700 my-1"></div>
-             <button onClick={handleDeleteSheet} className="w-full text-left px-4 py-2 text-sm hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400 flex items-center gap-2">
+             <button onClick={handleDeleteSheet} className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${isReadOnly ? 'text-gray-400 cursor-not-allowed' : 'hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400'}`} disabled={isReadOnly}>
                 <Trash2 size={14} /> Excluir
              </button>
           </div>

@@ -37,7 +37,14 @@ export interface Sheet {
   data: SheetData;
   conditionalFormats?: ConditionalRule[];
   validationRules?: ValidationRule[];
-  accessCode?: string; // Code required to view/edit
+  
+  // Access Control
+  editCode?: string; // Full read-write access
+  viewCode?: string; // Read-only access
+  
+  // Legacy support (optional during migration)
+  accessCode?: string; 
+  
   accessCodeExpiration?: number; // Timestamp when code expires
   isShared?: boolean; // Visual indicator
 }

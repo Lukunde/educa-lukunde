@@ -7,9 +7,10 @@ interface SpreadsheetProps {
   validationRules?: ValidationRule[];
   onCellChange: (rowIndex: number, colIndex: number, value: CellValue) => void;
   zoom?: number;
+  readOnly?: boolean;
 }
 
-const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationRules = [], onCellChange, zoom = 1 }) => {
+const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationRules = [], onCellChange, zoom = 1, readOnly = false }) => {
   const [editingCell, setEditingCell] = useState<{r: number, c: number} | null>(null);
   const [selectedCell, setSelectedCell] = useState<{r: number, c: number} | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
@@ -70,11 +71,15 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationR
         case 'Enter':
         case 'F2':
           e.preventDefault();
-          setEditingCell({ r, c });
+          if (!readOnly) {
+            setEditingCell({ r, c });
+          }
           break;
         case 'Delete':
         case 'Backspace':
-          onCellChange(r, c, "");
+          if (!readOnly) {
+            onCellChange(r, c, "");
+          }
           break;
         case 'Tab':
           e.preventDefault();
@@ -89,7 +94,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationR
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedCell, editingCell, data, maxCols, onCellChange]); // Added data dependency explicitly
+  }, [selectedCell, editingCell, data, maxCols, onCellChange, readOnly]); 
 
   const getCellStyle = (rowIndex: number, colIndex: number, value: CellValue) => {
     if (!rules || rowIndex === 0) return {}; 
@@ -145,7 +150,9 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationR
 
   const handleDoubleClick = (rowIndex: number, colIndex: number) => {
     setSelectedCell({ r: rowIndex, c: colIndex });
-    setEditingCell({ r: rowIndex, c: colIndex });
+    if (!readOnly) {
+      setEditingCell({ r: rowIndex, c: colIndex });
+    }
   };
 
   const handleSave = (r: number, c: number, value: string) => {
@@ -226,6 +233,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationR
                       className={`
                         border-b border-r border-gray-200 dark:border-gray-700 p-0 h-9 min-w-[100px] relative transition-colors duration-75
                         ${isSelected && !isEditing ? 'ring-2 ring-emerald-500 z-10' : ''}
+                        ${readOnly ? 'cursor-default' : 'cursor-cell'}
                       `}
                       style={style}
                       onClick={() => handleCellClick(rIdx, cIdx)}
@@ -268,7 +276,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationR
                             />
                         )
                       ) : (
-                        <div className="px-2 py-1.5 w-full h-full truncate select-none cursor-cell text-gray-700 dark:text-gray-300">
+                        <div className="px-2 py-1.5 w-full h-full truncate select-none text-gray-700 dark:text-gray-300">
                           {cellValue}
                         </div>
                       )}
