@@ -15,10 +15,10 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationR
   const tableRef = useRef<HTMLDivElement>(null);
 
   // Determine max columns safely
-  const maxCols = data && data.length > 0 ? data.reduce((max, row) => Math.max(max, row ? row.length : 0), 0) : 0;
+  const maxCols = data && data.length > 0 ? data.reduce((max, row) => Math.max(max, row && Array.isArray(row) ? row.length : 0), 0) : 0;
   
   // Generate headers safely
-  const headers = Array.from({ length: maxCols }, (_, i) => {
+  const headers = Array.from({ length: maxCols || 0 }, (_, i) => {
     let label = "";
     let n = i;
     while (n >= 0) {
@@ -97,7 +97,9 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationR
     const columnRules = rules.filter(r => r.columnIndex === colIndex);
     if (columnRules.length === 0) return {};
 
-    const numValue = Number(value);
+    // Normalize value for comparison (handle comma as decimal separator)
+    const normalizedValue = typeof value === 'string' ? value.replace(',', '.') : value;
+    const numValue = Number(normalizedValue);
     const isNumber = !isNaN(numValue) && value !== "" && value !== null;
 
     for (const rule of columnRules) {
@@ -197,7 +199,7 @@ const Spreadsheet: React.FC<SpreadsheetProps> = ({ data, rules = [], validationR
           </thead>
           <tbody>
             {data.map((row, rIdx) => {
-              if (!row) return null; // Skip undefined rows
+              if (!row || !Array.isArray(row)) return null; // Skip undefined or invalid rows
               return (
               <tr key={rIdx} className="hover:bg-blue-50/10 dark:hover:bg-blue-900/10">
                 <td className={`border-b border-r border-gray-200 dark:border-gray-700 text-center text-xs font-medium sticky left-0 z-10 transition-colors

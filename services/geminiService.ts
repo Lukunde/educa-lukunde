@@ -1,12 +1,41 @@
 import { GoogleGenAI } from "@google/genai";
 import { SheetData } from "../types";
 
-const apiKey = process.env.API_KEY || '';
-const ai = new GoogleGenAI({ apiKey });
+// Safely retrieve API key without crashing
+const getApiKey = () => {
+  try {
+    // Check for process.env safely
+    if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+      return process.env.API_KEY;
+    }
+  } catch (e) {
+    // Ignore error
+  }
+  return '';
+};
+
+// Lazy initialization to prevent top-level crashes
+let aiInstance: GoogleGenAI | null = null;
+
+const getAI = (): GoogleGenAI | null => {
+  if (aiInstance) return aiInstance;
+  
+  const key = getApiKey();
+  if (!key) return null;
+
+  try {
+    aiInstance = new GoogleGenAI({ apiKey: key });
+    return aiInstance;
+  } catch (error) {
+    console.error("Failed to initialize GoogleGenAI", error);
+    return null;
+  }
+};
 
 export const analyzeSheetData = async (data: SheetData, query: string): Promise<string> => {
-  if (!apiKey) {
-    return "Erro: Chave de API não configurada.";
+  const ai = getAI();
+  if (!ai) {
+    return "Erro: Chave de API não configurada ou erro de inicialização.";
   }
 
   try {
@@ -43,7 +72,8 @@ export const analyzeSheetData = async (data: SheetData, query: string): Promise<
 };
 
 export const suggestClassColumn = async (headers: string[]): Promise<string | null> => {
-   if (!apiKey) return null;
+   const ai = getAI();
+   if (!ai) return null;
 
    try {
      const prompt = `

@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { BookOpen, Pencil, Upload, Split, Plus, MessageSquare, Download, Menu, FileSpreadsheet, SaveAll, Palette, X, Trash2, Copy, Edit, ZoomIn, ZoomOut, Share2, Lock, Unlock, Link as LinkIcon, Check, Moon, Sun, ShieldCheck, Calculator, Clock, Calendar, ListChecks } from 'lucide-react';
 import Spreadsheet from './components/Spreadsheet';
 import AIAssistant from './components/AIAssistant';
 import { Sheet, SheetData, ConditionalRule, ConditionType, ConditionalStyle, ValidationRule, ValidationType } from './types';
-import { parseExcelFile, splitSheetByColumn } from './utils/excelUtils';
+import { parseExcelFile, splitSheetByColumn, generateUUID } from './utils/excelUtils';
 import { suggestClassColumn } from './services/geminiService';
 import * as XLSX from 'xlsx';
 
@@ -15,35 +15,51 @@ const PRESET_STYLES: ConditionalStyle[] = [
   { name: 'Azul (Destaque)', backgroundColor: '#BFDBFE', color: '#1E40AF' },
 ];
 
-// Helper for UUID generation with fallback
-const generateUUID = () => {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-        return crypto.randomUUID();
-    }
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-        var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    });
-};
-
 const App: React.FC = () => {
   // Theme State
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window !== 'undefined') {
-        const saved = localStorage.getItem('educa-lukunde-theme');
-        if (saved === 'dark' || saved === 'light') return saved;
-        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        try {
+            const saved = localStorage.getItem('educa-lukunde-theme');
+            if (saved === 'dark' || saved === 'light') return saved;
+            return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        } catch (e) {
+            // Fallback if localStorage access is denied
+            return 'light';
+        }
     }
     return 'light';
   });
 
-  // Initialize sheets from localStorage if available
+  // Initialize sheets from localStorage safely
   const [sheets, setSheets] = useState<Sheet[]>(() => {
+    // 1. Environment check
+    if (typeof window === 'undefined') return [];
+
     try {
-      const saved = localStorage.getItem('educa-lukunde-sheets');
-      return saved ? JSON.parse(saved) : [];
+      // 2. Storage Access check (handles SecurityError/Origin issues)
+      const storage = window.localStorage;
+      if (!storage) return [];
+
+      const saved = storage.getItem('educa-lukunde-sheets');
+      if (!saved) return [];
+      
+      // 3. Parsing check
+      const parsed = JSON.parse(saved);
+      
+      // 4. Structure check
+      if (!Array.isArray(parsed)) return [];
+      
+      // 5. Deep content validation
+      return parsed.filter((s: any) => 
+        s && 
+        typeof s === 'object' && 
+        typeof s.id === 'string' && 
+        Array.isArray(s.data)
+      );
     } catch (e) {
-      console.error("Failed to load sheets", e);
+      // Log warning but do not crash the app. Return empty array to trigger default sheet creation.
+      console.warn("Educa-Lukunde: Could not load data from localStorage (security or corruption issue). Starting fresh.", e);
       return [];
     }
   });
@@ -52,8 +68,9 @@ const App: React.FC = () => {
   const [showAI, setShowAI] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // Drag and Drop State
-  const [draggedSheetIndex, setDraggedSheetIndex] = useState<number | null>(null);
+  // Drag and Drop State using Ref to avoid closure staleness
+  const dragItem = useRef<number | null>(null);
+  const [draggedSheetIndex, setDraggedSheetIndex] = useState<number | null>(null); // For visual feedback only
   
   // Conditional Formatting State
   const [showFormatModal, setShowFormatModal] = useState(false);
@@ -115,7 +132,11 @@ const App: React.FC = () => {
     } else {
       document.documentElement.classList.remove('dark');
     }
-    localStorage.setItem('educa-lukunde-theme', theme);
+    try {
+        localStorage.setItem('educa-lukunde-theme', theme);
+    } catch (e) {
+        // Ignore storage errors
+    }
   }, [theme]);
 
   const toggleTheme = () => setTheme(prev => prev === 'light' ? 'dark' : 'light');
@@ -123,16 +144,30 @@ const App: React.FC = () => {
   // Persistence: Save sheets to localStorage whenever they change
   useEffect(() => {
     if (sheets.length > 0) {
-      localStorage.setItem('educa-lukunde-sheets', JSON.stringify(sheets));
+      try {
+        const dataToSave = JSON.stringify(sheets);
+        localStorage.setItem('educa-lukunde-sheets', dataToSave);
+      } catch (e) {
+        console.error("Erro ao salvar no localStorage (provavelmente cota excedida ou acesso negado):", e);
+      }
     }
   }, [sheets]);
 
   // Sync URL with active sheet ID
   useEffect(() => {
     if (activeSheetId) {
-      const url = new URL(window.location.href);
-      url.searchParams.set('pauta', activeSheetId);
-      window.history.replaceState({}, '', url.toString());
+      try {
+        const currentUrl = window.location.href;
+        // Check for blob protocol to avoid replacing state on blob URLs which causes crashes
+        if (currentUrl.startsWith('blob:')) return;
+
+        const url = new URL(currentUrl);
+        url.searchParams.set('pauta', activeSheetId);
+        window.history.replaceState({}, '', url.toString());
+      } catch (e) {
+        // Silently fail in restricted environments (sandboxes, iframes, blobs)
+        // This is expected in preview environments and should not crash the app
+      }
     }
   }, [activeSheetId]);
 
@@ -151,16 +186,24 @@ const App: React.FC = () => {
       setUnlockedSheets(new Set(['init'])); // Initially unlocked for creator
     } else if (!activeSheetId) {
        // If loaded from storage, check URL for shared sheet or default to first
-       const params = new URLSearchParams(window.location.search);
-       const sharedSheetId = params.get('pauta');
+       let sharedSheetId: string | null = null;
+       try {
+           const params = new URLSearchParams(window.location.search);
+           sharedSheetId = params.get('pauta');
+       } catch (e) {
+           // Ignore errors parsing URL
+       }
        
        if (sharedSheetId && sheets.find(s => s.id === sharedSheetId)) {
          setActiveSheetId(sharedSheetId);
        } else {
-         setActiveSheetId(sheets[0].id);
-         // Auto unlock if it's the default/init sheet and not shared
-         if (!sheets[0].accessCode) {
-             setUnlockedSheets(new Set([sheets[0].id]));
+         const firstSheet = sheets[0];
+         if (firstSheet) {
+            setActiveSheetId(firstSheet.id);
+            // Auto unlock if it's the default/init sheet and not shared
+            if (!firstSheet.accessCode) {
+                setUnlockedSheets(new Set([firstSheet.id]));
+            }
          }
        }
     }
@@ -168,28 +211,42 @@ const App: React.FC = () => {
 
   // Drag and Drop Handlers
   const handleDragStart = (e: React.DragEvent, index: number) => {
-    setDraggedSheetIndex(index);
-    e.dataTransfer.effectAllowed = "move";
+    if (e.dataTransfer) {
+        dragItem.current = index;
+        setDraggedSheetIndex(index);
+        e.dataTransfer.effectAllowed = "move";
+    }
   };
 
   const handleDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
-    if (draggedSheetIndex === null) return;
     
-    if (draggedSheetIndex !== index) {
-      const newSheets = [...sheets];
-      const item = newSheets[draggedSheetIndex];
-      // Remove from old index
-      newSheets.splice(draggedSheetIndex, 1);
-      // Insert at new index
-      newSheets.splice(index, 0, item);
-      
-      setSheets(newSheets);
-      setDraggedSheetIndex(index);
-    }
+    // Use ref for the current dragged item to ensure we have the latest value without re-render closures
+    const currentDragIndex = dragItem.current;
+    if (currentDragIndex === null || currentDragIndex === index) return;
+    
+    // Create new array
+    const newSheets = [...sheets];
+    const draggedItemContent = newSheets[currentDragIndex];
+    
+    // Safety check
+    if (!draggedItemContent) return;
+
+    // Remove from old index
+    newSheets.splice(currentDragIndex, 1);
+    // Insert at new index
+    newSheets.splice(index, 0, draggedItemContent);
+    
+    // Update ref to the new position so subsequent dragOvers are correct
+    dragItem.current = index;
+    
+    // Update state
+    setSheets(newSheets);
+    setDraggedSheetIndex(index);
   };
 
   const handleDragEnd = () => {
+    dragItem.current = null;
     setDraggedSheetIndex(null);
   };
 
@@ -206,6 +263,7 @@ const App: React.FC = () => {
     const wb = XLSX.utils.book_new();
     
     sheets.forEach(sheet => {
+      if (!sheet) return;
       const ws = XLSX.utils.aoa_to_sheet(sheet.data);
       let sheetName = (sheet.name || "Sheet").replace(/[\\/?*[\]]/g, " ").trim();
       if (sheetName.length > 31) sheetName = sheetName.substring(0, 31);
@@ -479,9 +537,34 @@ const App: React.FC = () => {
       }
     }
 
-    const updatedSheet = { ...activeSheet, data: newData };
+    // Auto-apply conditional formatting
+    const failRule: ConditionalRule = {
+        id: generateUUID(),
+        columnIndex: mediaColIdx,
+        condition: 'lt',
+        value: 5,
+        style: PRESET_STYLES[0] // Red
+    };
+
+    const passRule: ConditionalRule = {
+        id: generateUUID(),
+        columnIndex: mediaColIdx,
+        condition: 'gte',
+        value: 5,
+        style: PRESET_STYLES[1] // Green
+    };
+
+    const existingRules = activeSheet.conditionalFormats || [];
+    const otherRules = existingRules.filter(r => r.columnIndex !== mediaColIdx);
+
+    const updatedSheet = { 
+        ...activeSheet, 
+        data: newData,
+        conditionalFormats: [...otherRules, failRule, passRule]
+    };
+    
     setSheets(prev => prev.map(s => s.id === activeSheet.id ? updatedSheet : s));
-    alert(`Média calculada para ${updatedCount} linhas.`);
+    alert(`Média calculada para ${updatedCount} linhas. Formatação aplicada: Verde (>=5), Vermelho (<5).`);
   };
 
   // Helper: Convert column letter to index
@@ -776,7 +859,18 @@ const App: React.FC = () => {
 
   const handleCopyLink = () => {
       if (!activeSheet) return;
-      const link = `${window.location.origin}?pauta=${activeSheet.id}`;
+      
+      // Use fallback if window.location.origin is unavailable/null
+      let origin = "";
+      try {
+          origin = window.location.origin;
+          if (!origin || origin === 'null') origin = "";
+      } catch(e) {
+          origin = "";
+      }
+      
+      const link = origin ? `${origin}?pauta=${activeSheet.id}` : `?pauta=${activeSheet.id}`;
+      
       if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(link).then(() => {
               setLinkCopySuccess(true);
@@ -1041,32 +1135,36 @@ const App: React.FC = () => {
                 <Plus size={16} />
               </button>
               
-              {sheets.map((sheet, index) => (
-                <button
-                  key={sheet.id}
-                  draggable
-                  onDragStart={(e) => handleDragStart(e, index)}
-                  onDragOver={(e) => handleDragOver(e, index)}
-                  onDragEnd={handleDragEnd}
-                  onClick={() => setActiveSheetId(sheet.id)}
-                  onContextMenu={(e) => handleContextMenu(e, sheet.id)}
-                  className={`
-                    px-4 py-1.5 text-xs font-medium rounded-t-md border-x relative top-[1px] min-w-[100px] truncate transition-colors flex items-center gap-2 select-none cursor-pointer
-                    ${activeSheetId === sheet.id 
-                      ? 'bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600 text-emerald-700 dark:text-emerald-400 border-b-white dark:border-b-gray-800 border-t-2 border-t-emerald-500 z-10' 
-                      : 'bg-gray-50 dark:bg-gray-700 border-transparent text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-600 hover:text-gray-700 dark:hover:text-gray-200 border-t border-transparent'
-                    }
-                    ${draggedSheetIndex === index ? 'opacity-50' : ''}
-                  `}
-                >
-                  {sheet.accessCode ? (
-                      unlockedSheets.has(sheet.id) ? <Unlock size={10} className="text-emerald-500"/> : <Lock size={10} className="text-red-400"/>
-                  ) : (
-                      <FileSpreadsheet size={12} className={activeSheetId === sheet.id ? "text-emerald-500" : "text-gray-400"} />
-                  )}
-                  {sheet.name}
-                </button>
-              ))}
+              {sheets.map((sheet, index) => {
+                // Safety check for undefined sheets in list
+                if (!sheet) return null;
+                return (
+                  <button
+                    key={sheet.id || index}
+                    draggable
+                    onDragStart={(e) => handleDragStart(e, index)}
+                    onDragOver={(e) => handleDragOver(e, index)}
+                    onDragEnd={handleDragEnd}
+                    onClick={() => setActiveSheetId(sheet.id)}
+                    onContextMenu={(e) => handleContextMenu(e, sheet.id)}
+                    className={`
+                      px-4 py-1.5 text-xs font-medium rounded-t-md border-x relative top-[1px] min-w-[100px] truncate transition-colors flex items-center gap-2 select-none cursor-pointer
+                      ${activeSheetId === sheet.id 
+                        ? 'bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600 text-emerald-700 dark:text-emerald-400 border-b-white dark:border-b-gray-800 border-t-2 border-t-emerald-500 z-10' 
+                        : 'bg-gray-50 dark:bg-gray-700 border-transparent text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-600 hover:text-gray-700 dark:hover:text-gray-200 border-t border-transparent'
+                      }
+                      ${draggedSheetIndex === index ? 'opacity-50' : ''}
+                    `}
+                  >
+                    {sheet.accessCode ? (
+                        unlockedSheets.has(sheet.id) ? <Unlock size={10} className="text-emerald-500"/> : <Lock size={10} className="text-red-400"/>
+                    ) : (
+                        <FileSpreadsheet size={12} className={activeSheetId === sheet.id ? "text-emerald-500" : "text-gray-400"} />
+                    )}
+                    {sheet.name}
+                  </button>
+                );
+              })}
             </div>
         </div>
 
@@ -1211,188 +1309,6 @@ const App: React.FC = () => {
                </div>
              </div>
            </div>
-        )}
-
-        {/* Validation Modal */}
-        {showValidationModal && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm">
-            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl w-96 p-6 border border-gray-200 dark:border-gray-700" onClick={e => e.stopPropagation()}>
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="font-semibold text-gray-800 dark:text-white flex items-center gap-2">
-                  <ShieldCheck size={18} className="text-emerald-600 dark:text-emerald-400"/>
-                  Validação de Dados
-                </h3>
-                <button onClick={() => setShowValidationModal(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Coluna (Letra)</label>
-                  <input 
-                    type="text" 
-                    placeholder="Ex: B" 
-                    className="w-full border border-gray-300 dark:border-gray-600 rounded p-2 text-sm uppercase focus:border-emerald-500 outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                    value={newValidation.colHeader}
-                    onChange={e => setNewValidation({...newValidation, colHeader: e.target.value})}
-                  />
-                </div>
-
-                <div>
-                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Tipo de Dado</label>
-                   <select 
-                     className="w-full border border-gray-300 dark:border-gray-600 rounded p-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                     value={newValidation.type}
-                     onChange={e => setNewValidation({...newValidation, type: e.target.value as ValidationType})}
-                   >
-                     <option value="number">Número</option>
-                     <option value="text">Texto</option>
-                     <option value="date">Data</option>
-                     <option value="list">Lista</option>
-                     <option value="email">Email</option>
-                   </select>
-                </div>
-
-                {/* Conditional Inputs */}
-                {(newValidation.type === 'number' || newValidation.type === 'date') && (
-                    <div className="flex gap-2">
-                        <div className="flex-1">
-                            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Mínimo</label>
-                            <input 
-                                type={newValidation.type === 'date' ? 'date' : 'number'}
-                                className="w-full border border-gray-300 dark:border-gray-600 rounded p-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                                value={newValidation.min}
-                                onChange={e => setNewValidation({...newValidation, min: e.target.value})}
-                            />
-                        </div>
-                        <div className="flex-1">
-                            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Máximo</label>
-                            <input 
-                                type={newValidation.type === 'date' ? 'date' : 'number'}
-                                className="w-full border border-gray-300 dark:border-gray-600 rounded p-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                                value={newValidation.max}
-                                onChange={e => setNewValidation({...newValidation, max: e.target.value})}
-                            />
-                        </div>
-                    </div>
-                )}
-
-                {newValidation.type === 'list' && (
-                    <div>
-                        <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Opções (separadas por vírgula)</label>
-                        <input 
-                            type="text" 
-                            placeholder="Ex: Aprovado, Reprovado, Pendente"
-                            className="w-full border border-gray-300 dark:border-gray-600 rounded p-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                            value={newValidation.options}
-                            onChange={e => setNewValidation({...newValidation, options: e.target.value})}
-                        />
-                    </div>
-                )}
-
-                <div>
-                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Mensagem de Erro (Opcional)</label>
-                   <input 
-                     type="text" 
-                     className="w-full border border-gray-300 dark:border-gray-600 rounded p-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                     value={newValidation.errorMessage}
-                     onChange={e => setNewValidation({...newValidation, errorMessage: e.target.value})}
-                     placeholder="Ex: Valor inválido"
-                   />
-                </div>
-
-                <button 
-                  onClick={handleAddValidation}
-                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2 rounded text-sm transition-colors mt-2"
-                >
-                  Salvar Validação
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Conditional Formatting Modal */}
-        {showFormatModal && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm">
-            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl w-96 p-6 border border-gray-200 dark:border-gray-700" onClick={e => e.stopPropagation()}>
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="font-semibold text-gray-800 dark:text-white flex items-center gap-2">
-                  <Palette size={18} className="text-emerald-600 dark:text-emerald-400"/>
-                  Nova Regra
-                </h3>
-                <button onClick={() => setShowFormatModal(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Aplicar à coluna (Letra)</label>
-                  <input 
-                    type="text" 
-                    placeholder="Ex: C" 
-                    className="w-full border border-gray-300 dark:border-gray-600 rounded p-2 text-sm uppercase focus:border-emerald-500 outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                    value={newRule.colHeader}
-                    onChange={e => setNewRule({...newRule, colHeader: e.target.value})}
-                  />
-                </div>
-
-                <div className="flex gap-2">
-                   <div className="flex-1">
-                      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Condição</label>
-                      <select 
-                        className="w-full border border-gray-300 dark:border-gray-600 rounded p-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                        value={newRule.condition}
-                        onChange={e => setNewRule({...newRule, condition: e.target.value as ConditionType})}
-                      >
-                        <option value="gt">Maior que (&gt;)</option>
-                        <option value="gte">Maior ou igual (&ge;)</option>
-                        <option value="lt">Menor que (&lt;)</option>
-                        <option value="lte">Menor ou igual (&le;)</option>
-                        <option value="eq">Igual a (=)</option>
-                        <option value="contains">Contém texto</option>
-                      </select>
-                   </div>
-                   <div className="flex-1">
-                      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Valor</label>
-                      <input 
-                        type="text" 
-                        className="w-full border border-gray-300 dark:border-gray-600 rounded p-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                        value={newRule.value}
-                        onChange={e => setNewRule({...newRule, value: e.target.value})}
-                      />
-                   </div>
-                </div>
-
-                <div>
-                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Estilo</label>
-                   <div className="grid grid-cols-2 gap-2">
-                      {PRESET_STYLES.map((style, idx) => (
-                        <button
-                          key={idx}
-                          onClick={() => setNewRule({...newRule, styleIndex: idx})}
-                          className={`p-2 rounded text-xs font-medium border text-center transition-all ${
-                            newRule.styleIndex === idx ? 'ring-2 ring-emerald-500 border-transparent' : 'border-gray-200 dark:border-gray-600'
-                          }`}
-                          style={{ backgroundColor: style.backgroundColor, color: style.color }}
-                        >
-                          {style.name}
-                        </button>
-                      ))}
-                   </div>
-                </div>
-
-                <button 
-                  onClick={handleAddRule}
-                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2 rounded text-sm transition-colors mt-2"
-                >
-                  Adicionar Regra
-                </button>
-              </div>
-            </div>
-          </div>
         )}
 
         {/* Tab Context Menu */}
