@@ -1,0 +1,5 @@
+{
+  "name": "Educa-Lukunde",
+  "description": "Uma aplicação moderna estilo planilha inteligente para gestão escolar. Permite carregar pautas Excel, separar turmas automaticamente e analisar dados com IA.",
+  "requestFramePermissions": []
+}
